@@ -41,6 +41,22 @@ def scan_library(path=None):
     })
     xbmc.executeJSONRPC(req)
 
+def clean_library(content):
+    """
+    Limpia de la base de datos de Kodi las entradas cuyos ficheros ya no
+    existen. Un VideoLibrary.Scan NO hace esto (solo añade contenido nuevo),
+    asi que tras borrar una serie/pelicula hace falta un Clean para que no
+    quede rastro en la biblioteca de Kodi. Sin ambito de directorio: ese
+    parametro tiene bugs conocidos (no funciona bien con ciertos paths), asi
+    que se limpia todo el tipo de contenido para no arriesgarse a que la
+    entrada borrada se quede a medias.
+    """
+    req = json.dumps({
+        "jsonrpc": "2.0", "method": "VideoLibrary.Clean",
+        "params": {"content": content, "showdialogs": False}, "id": 1
+    })
+    xbmc.executeJSONRPC(req)
+
 def notify_service():
     """Notifica al servicio que hay datos nuevos para que compruebe de inmediato."""
     xbmc.executebuiltin(f'NotifyAll({ADDON_ID},{ADDON_ID}.Updated,"")')
@@ -285,13 +301,13 @@ def remove_from_library(label):
         # Borrar ficheros .strm dentro
         for f_name in xbmcvfs.listdir(folder)[1]:
             xbmcvfs.delete(os.path.join(folder, f_name))
-        xbmcvfs.rmdir(folder)
+        xbmcvfs.rmdir(folder, force=True)
         log(f"Carpeta eliminada: {folder}")
 
     save_metadata(meta)
     xbmcgui.Dialog().notification("Smart Library",
         f"'{name}' eliminado de la librería", xbmcgui.NOTIFICATION_INFO, 3000)
-    scan_library(TVSHOWS_DIR if kind == "tvshow" else MOVIES_DIR)
+    clean_library("tvshows" if kind == "tvshow" else "movies")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────

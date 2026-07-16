@@ -6,11 +6,11 @@ Addon de contexto para Kodi que permite construir una librería inteligente a pa
 
 - `README.md` — Manual completo del addon
 - `script.context.smartlibrary/` — Código fuente del addon
-- `script.context.smartlibrary_v6.11.0.zip` — Paquete instalable para Kodi
+- `script.context.smartlibrary_v6.11.3.zip` — Paquete instalable para Kodi
 
 ## Instalación rápida
 
-1. Descarga `script.context.smartlibrary_v6.11.0.zip`
+1. Descarga `script.context.smartlibrary_v6.11.3.zip`
 2. Kodi → Ajustes → Addons → Instalar desde archivo ZIP
 3. Reinicia Kodi
 

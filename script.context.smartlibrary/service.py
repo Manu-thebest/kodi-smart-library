@@ -1,4 +1,4 @@
-import xbmc, xbmcvfs, os, json, re
+import xbmc, xbmcvfs, os, json, re, threading
 
 ADDON_DATA    = xbmcvfs.translatePath("special://profile/addon_data/script.context.smartlibrary/")
 LIB_BASE      = os.path.join(ADDON_DATA, "Library/")
@@ -50,6 +50,30 @@ def get_items(path, media="video"):
         except Exception as e:
             log(f"  get_items excepcion [{m}]: {e}")
     return []
+
+def get_items_with_timeout(path, media="video", timeout=20):
+    """
+    Igual que get_items(), pero con limite de tiempo real. xbmc.executeJSONRPC
+    es una llamada bloqueante sin timeout propio: si el plugin de turno se
+    cuelga (visto con 'El Robo' / plugin.video.amazon-test, que no responde y
+    deja el servicio parado el resto de la sesion), sin esto el hilo del
+    servicio se queda esperando para siempre y ninguna serie posterior vuelve
+    a comprobarse. Se ejecuta en un hilo daemon aparte: si no responde a
+    tiempo, seguimos con la siguiente temporada/serie (el hilo colgado se
+    queda en segundo plano, pero ya no bloquea nada).
+    """
+    result = {}
+
+    def worker():
+        result['files'] = get_items(path, media)
+
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        log(f"  TIMEOUT ({timeout}s) esperando a: {path[:70]} — se omite esta temporada")
+        return []
+    return result.get('files', [])
 
 def get_episode_number(ep, fallback_idx):
     n = ep.get('episode', -1)
@@ -123,8 +147,11 @@ def ensure_source(path, name):
 
 def ensure_library_sources():
     for d in [TVSHOWS_DIR, MOVIES_DIR]:
-        if not xbmcvfs.exists(d):
-            xbmcvfs.mkdirs(d)
+        try:
+            if not xbmcvfs.exists(d):
+                xbmcvfs.mkdirs(d)
+        except Exception as e:
+            log(f"ensure_library_sources error creando {d}: {e}")
     ensure_source(TVSHOWS_DIR, "Smart Library – Series")
     ensure_source(MOVIES_DIR,  "Smart Library – Películas")
 
@@ -149,41 +176,49 @@ def check_and_update():
     total_new = 0
 
     for show, seasons in meta.get("tvshows", {}).items():
-        show_dir = os.path.join(TVSHOWS_DIR, show)
+        try:
+            show_dir = os.path.join(TVSHOWS_DIR, show)
 
-        if not xbmcvfs.exists(show_dir):
-            log(f"Recreando carpeta: {show_dir}")
-            xbmcvfs.mkdirs(show_dir)
+            if not xbmcvfs.exists(show_dir):
+                log(f"Recreando carpeta: {show_dir}")
+                xbmcvfs.mkdirs(show_dir)
 
-        log(f"Comprobando: {show}")
+            log(f"Comprobando: {show}")
 
-        for s_num_str, season_path in seasons.items():
-            if not season_path:
-                continue
-            s_num = int(s_num_str)
-            log(f"  T{s_num} path: {season_path[:80]}")
+            for s_num_str, season_path in seasons.items():
+                try:
+                    if not season_path:
+                        continue
+                    s_num = int(s_num_str)
+                    log(f"  T{s_num} path: {season_path[:80]}")
 
-            episodes = [ep for ep in get_items(season_path)
-                        if ep.get('filetype') != 'directory'
-                        and not is_promo(ep.get('label', ''))]
+                    episodes = [ep for ep in get_items_with_timeout(season_path)
+                                if ep.get('filetype') != 'directory'
+                                and not is_promo(ep.get('label', ''))]
 
-            log(f"  T{s_num}: {len(episodes)} episodio(s) encontrado(s)")
+                    log(f"  T{s_num}: {len(episodes)} episodio(s) encontrado(s)")
 
-            for i, ep in enumerate(episodes):
-                ep_url = ep.get('file', '') or ''
-                if not ep_url:
+                    for i, ep in enumerate(episodes):
+                        ep_url = ep.get('file', '') or ''
+                        if not ep_url:
+                            continue
+                        e_num    = get_episode_number(ep, i)
+                        filename = f"{show} S{s_num:02d}E{e_num:02d}.strm"
+                        filepath = os.path.join(show_dir, filename)
+
+                        if not xbmcvfs.exists(filepath):
+                            log(f"  → Nuevo: {filename}")
+                            with xbmcvfs.File(filepath, 'w') as f:
+                                f.write(ep_url)
+                            total_new += 1
+                        else:
+                            log(f"  Ya existe: {filename}")
+                except Exception as e:
+                    log(f"  ERROR en {show} T{s_num_str}, se omite esta temporada: {e}")
                     continue
-                e_num    = get_episode_number(ep, i)
-                filename = f"{show} S{s_num:02d}E{e_num:02d}.strm"
-                filepath = os.path.join(show_dir, filename)
-
-                if not xbmcvfs.exists(filepath):
-                    log(f"  → Nuevo: {filename}")
-                    with xbmcvfs.File(filepath, 'w') as f:
-                        f.write(ep_url)
-                    total_new += 1
-                else:
-                    log(f"  Ya existe: {filename}")
+        except Exception as e:
+            log(f"ERROR comprobando '{show}', se omite esta serie: {e}")
+            continue
 
     return total_new
 
@@ -193,11 +228,14 @@ def check_and_update():
 class UpdateService(xbmc.Monitor):
 
     def onNotification(self, sender, method, data):
-        if sender == ADDON_ID or ADDON_ID in method:
-            if 'Updated' in method:
-                log("Notificación recibida — lanzando check")
-                xbmc.sleep(2000)
-                self._run_check("(notificación)")
+        # Nos basta con que 'method' contenga el ID del addon y 'Updated';
+        # no dependemos de que 'sender' llegue exactamente igual, porque
+        # Kodi antepone prefijos (p.ej. "Other.") a las notificaciones
+        # personalizadas y confiar solo en sender era mas fragil.
+        if ADDON_ID in method and 'Updated' in method:
+            log("Notificación recibida — lanzando check")
+            xbmc.sleep(2000)
+            self._run_check("(notificación)")
 
     def _run_check(self, context=""):
         log(f"=== Check {context} ===")
@@ -218,7 +256,11 @@ class UpdateService(xbmc.Monitor):
         if self.waitForAbort(30):
             return
 
-        ensure_library_sources()
+        try:
+            ensure_library_sources()
+        except Exception as e:
+            log(f"ERROR en ensure_library_sources (continuo igualmente): {e}")
+
         self._run_check("(arranque)")
 
         # Comprobación periódica cada 6 horas

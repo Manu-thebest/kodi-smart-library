@@ -1,6 +1,6 @@
 # Smart Library — Kodi Context Addon
 
-**Versión:** 6.11.0
+**Versión:** 6.11.3
 **Autor:** Manu
 **Tipo:** Context menu addon + Service (Kodi Python 3)
 
@@ -156,3 +156,19 @@ Se ignoran automáticamente archivos que contengan en el nombre:
 - Si el plugin de streaming deja de funcionar, los `.strm` dejarán de reproducirse
 - La librería de Kodi se actualiza automáticamente al añadir contenido nuevo
 - Compatible con Kodi 19+ (Python 3)
+
+## Changelog
+
+### v6.11.3 (2026-07-16)
+- **Limpieza de librería al eliminar**: `remove_from_library()` ahora llama a `VideoLibrary.Clean` tras borrar los ficheros (el `Scan` solo añade, no quita). Así no quedan rastros visibles en la biblioteca de Kodi.
+- **rmdir con force=True**: Asegura que la carpeta desaparece por completo aunque queden restos.
+- **Timeout de 20s** contra plugins colgados (confirmado con `plugin.video.amazon-test` que dejaba el servicio bloqueado el resto de la sesión).
+- **Aislamiento de errores** por serie/temporada — si una falla, las siguientes siguen procesándose.
+
+### v6.11.0 (2026-07-03)
+- Versión inicial del addon
+- Menú contextual para añadir series y películas
+- Servicio de auto-actualización cada 6 horas
+- Soporte para series completas y temporadas individuales
+- Filtro de promos (trailers, teasers, etc.)
+- Fuentes de Kodi auto-gestionadas
