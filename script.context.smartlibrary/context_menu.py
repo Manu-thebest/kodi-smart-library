@@ -41,6 +41,22 @@ def scan_library(path=None):
     })
     xbmc.executeJSONRPC(req)
 
+def clean_library(content):
+    """
+    Limpia de la base de datos de Kodi las entradas cuyos ficheros ya no
+    existen. Un VideoLibrary.Scan NO hace esto (solo añade contenido nuevo),
+    asi que tras borrar una serie/pelicula hace falta un Clean para que no
+    quede rastro en la biblioteca de Kodi. Sin ambito de directorio: ese
+    parametro tiene bugs conocidos (no funciona bien con ciertos paths), asi
+    que se limpia todo el tipo de contenido para no arriesgarse a que la
+    entrada borrada se quede a medias.
+    """
+    req = json.dumps({
+        "jsonrpc": "2.0", "method": "VideoLibrary.Clean",
+        "params": {"content": content, "showdialogs": False}, "id": 1
+    })
+    xbmc.executeJSONRPC(req)
+
 def notify_service():
     """Notifica al servicio que hay datos nuevos para que compruebe de inmediato."""
     xbmc.executebuiltin(f'NotifyAll({ADDON_ID},{ADDON_ID}.Updated,"")')
@@ -48,6 +64,31 @@ def notify_service():
 def sanitize(name):
     name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '', name)
     return re.sub(r'\s+', ' ', name).strip(' .')
+
+
+def find_existing_folder(name, base_dir):
+    """Busca una carpeta existente con nombre similar (ignorando mayusculas)."""
+    name_norm = sanitize(name).lower()
+    try:
+        dirs = xbmcvfs.listdir(base_dir)[0] if xbmcvfs.exists(base_dir) else []
+        for d in dirs:
+            if sanitize(d).lower() == name_norm:
+                return d
+    except:
+        pass
+    return None
+
+
+def clear_removed_status(show_name, meta):
+    """Si la serie estaba en removed_series, la quita al re-añadirla."""
+    removed = meta.get("removed_series", [])
+    name_norm = sanitize(show_name).lower()
+    still_removed = [s for s in removed if sanitize(s).lower() != name_norm]
+    if len(still_removed) != len(removed):
+        meta["removed_series"] = still_removed
+        save_metadata(meta)
+        log(f"Serie '{show_name}' retirada de removed_series (re-adañida por usuario)")
+
 
 def strip_tags(text):
     return re.sub(r'(?i)\[/?(?:color|b|i|cr)[^\]]*\]', '', text).strip()
@@ -224,7 +265,6 @@ def handle_movie(label, path):
     xbmcgui.Dialog().notification("Smart Library",
         f"Película añadida: {movie_name} ✓",
         xbmcgui.NOTIFICATION_INFO, 4000)
-    scan_library(MOVIES_DIR)
     notify_service()
 
 
@@ -241,57 +281,89 @@ def manual_update():
 
 # ── Eliminar de la librería ───────────────────────────────────────────────────
 
+def find_show_in_metadata(name, meta):
+    """Busca una serie en metadata ignorando mayúsculas/minúsculas y caracteres especiales."""
+    name_norm = sanitize(name).lower()
+    for show in meta.get("tvshows", {}):
+        if sanitize(show).lower() == name_norm:
+            return "tvshow", show
+    for movie in meta.get("movies", {}):
+        if sanitize(movie).lower() == name_norm:
+            return "movie", movie
+    return None, None
+
+
 def remove_from_library(label):
     """
     Elimina una serie o película del registro y borra su carpeta de .strm.
-    Esta es la única forma de que el servicio deje de rastrearla.
+    Detecta automaticamente el nombre desde el label contextual.
+    Anade la serie a 'removed_series' para que el servicio no la re-annaida.
     """
     meta = load_metadata()
 
-    # Construir lista de lo que hay registrado
-    options = []
-    keys    = []
-    for show in meta.get("tvshows", {}):
-        options.append(f"📺  {show}")
-        keys.append(("tvshow", show))
-    for movie in meta.get("movies", {}):
-        options.append(f"🎬  {movie}")
-        keys.append(("movie", movie))
+    # Intentar detectar el nombre desde el label contextual
+    show_name = None
+    kind = None
+    if label:
+        guess, _ = extract_show_and_season(label)
+        if guess:
+            found_kind, found_name = find_show_in_metadata(guess, meta)
+            if found_name:
+                show_name = found_name
+                kind = found_kind
 
-    if not options:
-        xbmcgui.Dialog().ok("Smart Library", "No hay nada registrado en la librería.")
-        return
+    # Si no se pudo detectar, mostrar dialogo de seleccion
+    if not show_name:
+        options = []
+        keys    = []
+        for show in meta.get("tvshows", {}):
+            options.append(f"\U0001f4fa  {show}")
+            keys.append(("tvshow", show))
+        for movie in meta.get("movies", {}):
+            options.append(f"\U0001f3ac  {movie}")
+            keys.append(("movie", movie))
 
-    idx = xbmcgui.Dialog().select("¿Qué quieres eliminar?", options)
-    if idx < 0:
-        return
+        if not options:
+            xbmcgui.Dialog().ok("Smart Library", "No hay nada registrado en la libreria.")
+            return
 
-    kind, name = keys[idx]
+        idx = xbmcgui.Dialog().select("Que quieres eliminar?", options)
+        if idx < 0:
+            return
+
+        kind, show_name = keys[idx]
 
     if not xbmcgui.Dialog().yesno("Smart Library",
-            f"¿Eliminar '{name}' de la librería?\n"
-            "Se borrarán los ficheros .strm y dejará de actualizarse."):
+            f"Eliminar '{show_name}' de la libreria?\n"
+            "Se borraran los ficheros .strm y dejara de actualizarse."):
         return
 
-    # Borrar carpeta
+    # Anotar como eliminada para que el servicio no la re-annada
+    removed = meta.setdefault("removed_series", [])
+    if show_name not in removed:
+        removed.append(show_name)
+
+    # Borrar carpeta y entrada de metadata
     if kind == "tvshow":
-        folder = os.path.join(TVSHOWS_DIR, name)
-        del meta["tvshows"][name]
+        folder = os.path.join(TVSHOWS_DIR, show_name)
+        if show_name in meta.get("tvshows", {}):
+            del meta["tvshows"][show_name]
     else:
-        folder = os.path.join(MOVIES_DIR, name)
-        del meta["movies"][name]
+        folder = os.path.join(MOVIES_DIR, show_name)
+        if show_name in meta.get("movies", {}):
+            del meta["movies"][show_name]
 
     if xbmcvfs.exists(folder):
-        # Borrar ficheros .strm dentro
         for f_name in xbmcvfs.listdir(folder)[1]:
             xbmcvfs.delete(os.path.join(folder, f_name))
-        xbmcvfs.rmdir(folder)
+        xbmcvfs.rmdir(folder, force=True)
         log(f"Carpeta eliminada: {folder}")
 
     save_metadata(meta)
     xbmcgui.Dialog().notification("Smart Library",
-        f"'{name}' eliminado de la librería", xbmcgui.NOTIFICATION_INFO, 3000)
-    scan_library(TVSHOWS_DIR if kind == "tvshow" else MOVIES_DIR)
+        f"'{show_name}' eliminado de la libreria", xbmcgui.NOTIFICATION_INFO, 3000)
+    clean_library("tvshows" if kind == "tvshow" else "movies")
+
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -302,18 +374,48 @@ def main():
     path  = item.getPath()
     log(f"label='{label}'  path='{path}'")
 
-    # Rechazar paths que no son de plugin (videodb://, archivos locales, etc.)
+    # Si es path de libreria de Kodi, ofrecer eliminar directamente
     if path.startswith('videodb://') or path.startswith('/') or not path:
-        xbmcgui.Dialog().ok(
-            "Smart Library",
-            "Selecciona el contenido desde el plugin de la plataforma\n"
-            "(Amazon, HBO, Movistar+...), no desde la librería de Kodi.")
+        meta = load_metadata()
+        guess, _ = extract_show_and_season(label)
+        found_kind = None
+        found_name = None
+        if guess:
+            found_kind, found_name = find_show_in_metadata(guess, meta)
+        if not found_name:
+            remove_from_library(label)
+            return
+        if not xbmcgui.Dialog().yesno("Smart Library",
+                "Eliminar de Smart Library?\n\n" + found_name + "\n\n"
+                "Se borraran los .strm y dejara de aparecer."):
+            return
+        removed = meta.setdefault("removed_series", [])
+        if found_name not in removed:
+            removed.append(found_name)
+        if found_kind == "tvshow":
+            folder = os.path.join(TVSHOWS_DIR, found_name)
+            if found_name in meta.get("tvshows", {}):
+                del meta["tvshows"][found_name]
+        else:
+            folder = os.path.join(MOVIES_DIR, found_name)
+            if found_name in meta.get("movies", {}):
+                del meta["movies"][found_name]
+        if xbmcvfs.exists(folder):
+            for f_name in xbmcvfs.listdir(folder)[1]:
+                xbmcvfs.delete(os.path.join(folder, f_name))
+            xbmcvfs.rmdir(folder, force=True)
+            log(f"Carpeta eliminada: {folder}")
+        save_metadata(meta)
+        clean_library(found_kind or "tvshows")
+        xbmcgui.Dialog().notification("Smart Library",
+            "'" + found_name + "' eliminado de Smart Library",
+            xbmcgui.NOTIFICATION_INFO, 3000)
         return
 
     choice = xbmcgui.Dialog().select(
         "Smart Library",
-        ["📺  Añadir Serie o Temporada", "🎬  Añadir Película",
-         "🗑️  Eliminar de la librería",  "🔄  Actualizar series ahora"])
+        ["\U0001f4fa  Anadir Serie o Temporada", "\U0001f3ac  Anadir Pelicula",
+         "\U0001f5d1  Eliminar de la libreria",  "\U0001f504  Actualizar series ahora"])
     if choice < 0:
         return
 
@@ -327,7 +429,7 @@ def main():
         manual_update()
         return
 
-    # ── Serie / Temporada ─────────────────────────────────────────────────────
+    # Serie / Temporada
     show, s_num_hint = extract_show_and_season(label)
     show = ask("Nombre de la serie", show)
     if not show:
@@ -336,24 +438,29 @@ def main():
     items = get_items(path)
     if not items:
         xbmcgui.Dialog().ok("Smart Library",
-            f"No se encontró contenido.\nSerie: {show}")
+            f"No se encontro contenido.\nSerie: {show}")
         return
 
     has_dirs = any(is_directory(it) for it in items)
+    existing = find_existing_folder(show, TVSHOWS_DIR)
+    if existing and existing != show:
+        log(f"Usando carpeta existente: '{existing}' en vez de '{show}'")
+        show = existing
     show_dir = os.path.join(TVSHOWS_DIR, show)
     if not xbmcvfs.exists(show_dir):
         xbmcvfs.mkdirs(show_dir)
+    clear_removed_status(show, load_metadata())
 
     dp = xbmcgui.DialogProgress()
     total_created = 0
 
-    # ── Serie completa ────────────────────────────────────────────────────────
+    # Serie completa
     if has_dirs:
         seasons = [it for it in items if is_directory(it)]
-        dp.create("Smart Library", f"{show} — Serie completa")
+        dp.create("Smart Library", f"{show} - Serie completa")
         season_data = []
         for s in seasons:
-            eps   = [e for e in get_items(s.get('file', '')) if not is_promo(e)]
+            eps = [e for e in get_items(s.get('file', '')) if not is_promo(e)]
             s_num, _ = find_season(strip_tags(s.get('label', '')))
             if s_num is None:
                 s_num, _ = find_season(s.get('file', ''))
@@ -367,13 +474,13 @@ def main():
             total_created += write_episodes(show_dir, show, s_num, eps, dp, offset, total_eps)
             offset += len(eps)
 
-    # ── Temporada individual ──────────────────────────────────────────────────
+    # Temporada individual
     else:
-        s_num = ask("Número de temporada", s_num_hint, numeric=True)
+        s_num = ask("Numero de temporada", s_num_hint, numeric=True)
         if s_num is None:
             return
         episodes = [it for it in items if not is_directory(it) and not is_promo(it)]
-        dp.create("Smart Library", f"{show} — Temporada {s_num}")
+        dp.create("Smart Library", f"{show} - Temporada {s_num}")
         register_tvshow(show, s_num, path)
         total_created = write_episodes(show_dir, show, s_num, episodes, dp, 0, len(episodes))
 
@@ -381,9 +488,8 @@ def main():
 
     if total_created > 0:
         xbmcgui.Dialog().notification("Smart Library",
-            f"{show}: {total_created} episodio(s) añadidos ✓",
+            f"{show}: {total_created} episodio(s) anadidos \u2713",
             xbmcgui.NOTIFICATION_INFO, 4000)
-        scan_library(TVSHOWS_DIR)
         notify_service()
     else:
         xbmcgui.Dialog().notification("Smart Library",
