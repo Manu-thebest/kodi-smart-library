@@ -378,9 +378,7 @@ def check_and_update():
                                 f.write(ep_url)
                             total_new += 1
 
-                        # Ya no inyectamos en BD - el scanner de Kodi lo hara
-
-                        pass
+                        # No inyectamos en BD - el scanner de Kodi se encarga
 
                 except Exception as e:
                     log(f"  ERROR en {show} T{s_num_str}, se omite esta temporada: {e}")

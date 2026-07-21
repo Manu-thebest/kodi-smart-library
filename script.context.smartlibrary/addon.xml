@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<addon id="script.context.smartlibrary" name="Smart Library" version="6.11.3" provider-name="Manu">
+<addon id="script.context.smartlibrary" name="Smart Library" version="6.11.4" provider-name="Manu">
     <requires>
         <import addon="xbmc.python" version="3.0.0"/>
     </requires>
@@ -14,6 +14,6 @@
     <extension point="xbmc.service" library="service.py" start="startup"/>
     <extension point="xbmc.addon.metadata">
         <platform>all</platform>
-        <news>6.11.3: Al eliminar una serie/pelicula, remove_from_library() llamaba a VideoLibrary.Scan tras borrar los ficheros — pero Scan solo anade contenido nuevo, no quita de la base de datos lo que ya no existe. Resultado: la entrada borrada podia quedarse visible en la biblioteca de Kodi (rastro) hasta una limpieza manual. Ahora se llama a VideoLibrary.Clean (sin acotar por directorio, que tiene bugs conocidos con ciertas rutas; se limpia todo el tipo de contenido para no arriesgarse a un borrado a medias). rmdir con force=True para asegurar que la carpeta desaparece por completo. 6.11.2: timeout de 20s contra plugins colgados (confirmado con kodi.log: plugin.video.amazon-test). 6.11.1: aislamiento de errores por serie/temporada.</news>
+        <news>6.11.4: Eliminada inyección directa en BD. Ahora solo crea .strm en disco y Kodi escanea nativamente. Añadido removed_series: series borradas desde menú contextual no reaparecen. Añadida detección inteligente de nombre de serie desde el label contextual. 6.11.3: Al eliminar una serie/pelicula, remove_from_library() llamaba a VideoLibrary.Scan tras borrar los ficheros — pero Scan solo anade contenido nuevo, no quita de la base de datos lo que ya no existe. Resultado: la entrada borrada podia quedarse visible en la biblioteca de Kodi (rastro) hasta una limpieza manual. Ahora se llama a VideoLibrary.Clean (sin acotar por directorio, que tiene bugs conocidos con ciertas rutas; se limpia todo el tipo de contenido para no arriesgarse a un borrado a medias). rmdir con force=True para asegurar que la carpeta desaparece por completo. 6.11.2: timeout de 20s contra plugins colgados (confirmado con kodi.log: plugin.video.amazon-test). 6.11.1: aislamiento de errores por serie/temporada.</news>
     </extension>
 </addon>
