@@ -445,6 +445,9 @@ class UpdateService(xbmc.Monitor):
         log("Inyectando episodios existentes en la BD de Kodi...")
         check_and_update()
 
+        # Escanear la carpeta TVShows para que Kodi detecte los .strm
+        xbmc.executebuiltin("UpdateLibrary(video, %s)" % TVSHOWS_DIR)
+
         # Limpiar entradas huérfanas de la BD de Kodi (directorios que ya no
         # existen pero siguen en la tabla path)
         try:
