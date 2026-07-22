@@ -355,23 +355,13 @@ def check_and_update():
                 try:
                     if not season_path:
                         continue
-                    # Amazon: convertir URL detalle (?cat=Browse) a /pv/browse/
-                    season_url = season_path
-                    if '?cat=Browse' in season_url:
-                        import urllib.parse as _up
-                        _parsed = _up.urlparse(season_url)
-                        _params = _up.parse_qs(_parsed.query)
-                        _opt = _params.get('opt', [''])[0]
-                        if 'itemId=' in _opt:
-                            _item_id = _opt.replace('itemId=', '')
-                            season_url = 'plugin://plugin.video.amazon-test/pv/browse/root/Watchlist/watchlist/tv/' + _item_id
-                            log(f'  T{s_num_str}: URL Amazon convertida a: {season_url[:70]}...')
-                        else:
-                            log(f'  T{s_num_str}: no se pudo extraer itemId, omitiendo')
-                            continue
+                    # Saltar URLs de Amazon en formato detalle (no responden a Files.GetDirectory)
+                    if '?cat=Browse' in season_path:
+                        log(f"  T{s_num_str}: URL Amazon detail, omitiendo (strm ya existen)")
+                        continue
                     s_num = int(s_num_str)
-                    log(f"  T{s_num} path: {season_url[:80]}")
-                    episodes = [ep for ep in get_items_with_timeout(season_url)
+                    log(f"  T{s_num} path: {season_path[:80]}")
+                    episodes = [ep for ep in get_items_with_timeout(season_path)
                                 if ep.get('filetype') != 'directory'
                                 and not is_promo(ep.get('label', ''))]
                     log(f"  T{s_num}: {len(episodes)} episodio(s) encontrado(s)")
