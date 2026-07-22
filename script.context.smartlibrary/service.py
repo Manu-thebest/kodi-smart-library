@@ -355,6 +355,10 @@ def check_and_update():
                 try:
                     if not season_path:
                         continue
+                    # Saltar URLs de Amazon en formato detalle (no responden a Files.GetDirectory)
+                    if '?cat=Browse' in season_path:
+                        log(f"  T{s_num_str}: URL Amazon detail, omitiendo (strm ya existen)")
+                        continue
                     s_num = int(s_num_str)
                     log(f"  T{s_num} path: {season_path[:80]}")
 
