@@ -97,6 +97,56 @@ def get_episode_number(ep, fallback_idx):
     return fallback_idx + 1
 
 
+# ── Reparación de URLs de Amazon (detail → pv/browse Watchlist) ─────────────
+# Las URLs "detail" (?cat=Browse&...&opt=itemId%3d<gti>&url=details) las creó
+# la API Android del plugin de Amazon y ya no responden a Files.GetDirectory.
+# Si el itemId es una temporada conocida en la caché del plugin, se construye
+# la URL pv/browse equivalente vía Watchlist (formato que sí responde).
+_AMAZON_VD_DIR = xbmcvfs.translatePath("special://profile/addon_data/plugin.video.amazon-test/")
+_pv_videodata = None  # caché del PVVideoData*.pvdp por ejecución del servicio
+
+def _amazon_videodata():
+    """Carga (una sola vez) el PVVideoData*.pvdp del plugin de Amazon: un JSON
+    con info de cada gti (mediatype, parent, children...)."""
+    global _pv_videodata
+    if _pv_videodata is not None:
+        return _pv_videodata
+    _pv_videodata = {}
+    try:
+        import glob as _glob
+        candidates = sorted(_glob.glob(os.path.join(_AMAZON_VD_DIR, 'PVVideoData*.pvdp')),
+                            key=os.path.getmtime, reverse=True)
+        for path in candidates:
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    _pv_videodata = json.load(f)
+                log(f"PVVideoData cargado: {os.path.basename(path)} ({len(_pv_videodata)} entradas)")
+                break
+            except Exception as e:
+                log(f"PVVideoData ilegible {os.path.basename(path)}: {e}")
+    except Exception as e:
+        log(f"No se pudo cargar PVVideoData: {e}")
+    return _pv_videodata
+
+def repair_amazon_detail_url(url):
+    """Dada una URL detail de Amazon, devuelve la URL pv/browse equivalente
+    (vía Watchlist) o None si no se puede reparar."""
+    m = re.search(r'itemId(?:%3[dD]|=)(amzn1\.dv\.gti\.[0-9a-fA-F-]+)', url)
+    if not m:
+        return None
+    season_gti = m.group(1)
+    vd = _amazon_videodata().get(season_gti)
+    if not vd:
+        log(f"  repair: {season_gti} no está en la caché del plugin de Amazon")
+        return None
+    mt     = vd.get('metadata', {}).get('videometa', {}).get('mediatype')
+    parent = vd.get('parent')
+    if mt != 'season' or not parent:
+        log(f"  repair: {season_gti} es '{mt}', solo se reparan temporadas")
+        return None
+    return ("plugin://plugin.video.amazon-test/pv/browse/root/Watchlist/"
+            f"watchlist/tv/{parent}/{season_gti}")
+
 # ── Metadatos ─────────────────────────────────────────────────────────────────
 
 def load_metadata():
@@ -341,6 +391,7 @@ def check_and_update():
     removed = meta.get("removed_series", [])
     active_shows = {s: seas for s, seas in meta.get("tvshows", {}).items()
                     if s not in removed}
+    meta_changed = False
     for show, seasons in active_shows.items():
         try:
             show_dir = os.path.join(TVSHOWS_DIR, show)
@@ -355,16 +406,35 @@ def check_and_update():
                 try:
                     if not season_path:
                         continue
-                    # Saltar URLs de Amazon en formato detalle (no responden a Files.GetDirectory)
+                    # URLs de Amazon en formato detalle (?cat=Browse): ya no
+                    # responden a Files.GetDirectory → intentar reparación a
+                    # pv/browse vía Watchlist usando la caché del plugin
+                    repaired_from = None
                     if '?cat=Browse' in season_path:
-                        log(f"  T{s_num_str}: URL Amazon detail, omitiendo (strm ya existen)")
-                        continue
+                        new_path = repair_amazon_detail_url(season_path)
+                        if new_path:
+                            log(f"  T{s_num_str}: reparando URL Amazon detail → pv/browse Watchlist")
+                            repaired_from = season_path
+                            season_path   = new_path
+                        else:
+                            log(f"  T{s_num_str}: URL Amazon detail no reparable, omitiendo (strm ya existen)")
+                            continue
                     s_num = int(s_num_str)
                     log(f"  T{s_num} path: {season_path[:80]}")
                     episodes = [ep for ep in get_items_with_timeout(season_path)
                                 if ep.get('filetype') != 'directory'
                                 and not is_promo(ep.get('label', ''))]
                     log(f"  T{s_num}: {len(episodes)} episodio(s) encontrado(s)")
+
+                    # Solo guardar la reparación si la URL nueva realmente
+                    # devuelve episodios; si no, conservar la original
+                    if repaired_from:
+                        if episodes:
+                            seasons[s_num_str] = season_path
+                            meta_changed = True
+                            log(f"  T{s_num}: reparación confirmada y guardada en metadata")
+                        else:
+                            log(f"  T{s_num}: la URL reparada no devolvió episodios; se conserva la original")
 
                     for i, ep in enumerate(episodes):
                         ep_url = ep.get('file', '') or ''
@@ -388,6 +458,11 @@ def check_and_update():
         except Exception as e:
             log(f"ERROR comprobando '{show}', se omite esta serie: {e}")
             continue
+
+    # Guardar las reparaciones de URLs de Amazon confirmadas
+    if meta_changed:
+        save_metadata(meta)
+        log("Metadata guardada con URLs de Amazon reparadas")
 
     # También inyectar películas pendientes
     for movie_title, movie_path in meta.get("movies", {}).items():

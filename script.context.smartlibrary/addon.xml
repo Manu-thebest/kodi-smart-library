@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<addon id="script.context.smartlibrary" name="Smart Library" version="6.11.8" provider-name="Manu">
+<addon id="script.context.smartlibrary" name="Smart Library" version="6.12.0" provider-name="Manu">
     <requires>
         <import addon="xbmc.python" version="3.0.0"/>
     </requires>
@@ -14,6 +14,6 @@
     <extension point="xbmc.service" library="service.py" start="startup"/>
     <extension point="xbmc.addon.metadata">
         <platform>all</platform>
-        <news>6.11.5: Al iniciar Kodi, espera 30s y luego lanza UpdateLibrary(video) para que Kodi escanee los .strm automaticamente. 6.11.4: Eliminada inyección directa en BD.</news>
+        <news>6.12.0: Reparación automática de URLs de Amazon en formato detail (?cat=Browse, creadas cuando el plugin usaba la API Android): se convierten a pv/browse vía Watchlist usando la caché PVVideoData del propio plugin, y las series de Amazon vuelven a actualizarse solas. La reparación solo se guarda en metadata.json si la URL nueva devuelve episodios. 6.11.5: Al iniciar Kodi, espera 30s y lanza UpdateLibrary(video). 6.11.4: Eliminada inyección directa en BD.</news>
     </extension>
 </addon>
