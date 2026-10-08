@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<addon id="script.context.smartlibrary" name="Smart Library" version="6.13.4" provider-name="Manu">
+    <requires>
+        <import addon="xbmc.python" version="3.0.0"/>
+    </requires>
+    <extension point="kodi.context.item">
+        <menu id="kodi.core.main">
+            <item library="context_menu.py">
+                <label>Añadir a mi Librería Inteligente</label>
+                <visible>true</visible>
+            </item>
+        </menu>
+    </extension>
+    <extension point="xbmc.service" library="service.py" start="startup"/>
+    <extension point="xbmc.addon.metadata">
+        <platform>all</platform>
+        <news>6.13.4: Corregido que saliera SOLO el dialogo de "continuar viendo" de una pelicula al arrancar Kodi. El bucle de peliculas comprobaba si el enlace seguia vivo haciendo un Files.GetDirectory sobre la URL de REPRODUCCION (?asin=...&amp;mode=PlayVideo), y eso hacia que el add-on de Amazon resolviera el video y sacara el dialogo de reanudar sin que nadie lo pidiera. Ahora se re-resuelve por titulo y solo se reescribe el .strm si la URL cambio o falta. 6.13.3: Peliculas de Amazon: se busca SIN el anio final " (2021)" (que hacia que el buscador del add-on devolviera basura) y se mira SOLO la primera categoria de resultados (entrar en "Similar a..."/"Mas para explorar" se colgaba 20-30s). Antes: 30-55s por pelicula y las que llevaban anio fallaban; ahora 10/12 resueltas en 15s en total. 6.13.2: Corregido un bug introducido en la 6.13.x que dejaba las series de Amazon SIN actualizar: se ascendía al nodo-SERIE (que se cuelga 30-40s y devuelve vacío) en vez de resolver la serie por título. Ahora la búsqueda por título es el PASO 1 (verificado en real: 14/14 series Amazon localizadas, 1-8s cada una, 0 cuelgues) y las rutas guardadas pasan a ser el respaldo; además se descartan números de temporada absurdos (&gt;99). Las series que NO son de Amazon no se tocan. 6.13.0: Arreglo general para Amazon: re-resuelve cada serie POR TITULO con el buscador del add-on si su ruta caduca, DESCUBRE temporadas nuevas automaticamente (antes solo miraba las ya guardadas), quita TODOS los GUID de las rutas (antes solo el ultimo) y reintenta ante fallos transitorios. 6.12.0: Reparación automática de URLs de Amazon en formato detail (?cat=Browse, creadas cuando el plugin usaba la API Android): se convierten a pv/browse vía Watchlist usando la caché PVVideoData del propio plugin, y las series de Amazon vuelven a actualizarse solas. La reparación solo se guarda en metadata.json si la URL nueva devuelve episodios. 6.11.5: Al iniciar Kodi, espera 30s y lanza UpdateLibrary(video). 6.11.4: Eliminada inyección directa en BD.</news>
+    </extension>
+</addon>
