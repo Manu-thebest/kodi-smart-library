@@ -297,14 +297,97 @@ def load_metadata():
         return {"tvshows": {}, "movies": {}}
 
 
+# ── Guardado a prueba de escrituras simultaneas ───────────────────────────────
+# PROBLEMA (verificado en real, 12-nov-2026): el servicio y el menu guardan
+# metadata.json ENTERO. Si coinciden en el tiempo, el segundo pisa lo que el
+# primero acaba de escribir y esa serie/pelicula desaparece del registro sin
+# dejar rastro (se paso de 82 series a 80 sin ningun borrado en el log).
+# SOLUCION: antes de escribir se bloquea el fichero, se RELEE lo que hay en
+# disco y se FUSIONA con lo nuestro; se escribe en un temporal y se sustituye
+# de golpe (os.replace), asi que nunca queda un JSON a medias. Un borrado
+# voluntario se respeta porque la serie queda en removed_series.
+
+def _norm_key(name):
+    return re.sub(r'[^a-z0-9]+', ' ', str(name).lower()).strip()
+
+def _meta_lock():
+    import fcntl
+    fd = open(METADATA_FILE + ".lock", "a+")
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    return fd
+
+def _read_meta_file():
+    try:
+        with open(METADATA_FILE, "r", encoding="utf-8") as f:
+            return json.loads(f.read())
+    except Exception:
+        return None
+
+def _merge_meta(disco, mio):
+    """Fusiona la copia del disco con la nuestra sin perder entradas."""
+    if not isinstance(disco, dict) or not isinstance(mio, dict):
+        return mio
+    disco_borrados = list(disco.get("removed_series") or [])
+    mio_borrados = list(mio.get("removed_series") or [])
+    disco_borrados_norm = {_norm_key(x) for x in disco_borrados}
+    mio_borrados_norm = {_norm_key(x) for x in mio_borrados}
+    # Borrados que he hecho yo en esta operacion (aun no estaban en el disco)
+    nuevos_borrados = mio_borrados_norm - disco_borrados_norm
+    # Borrados que ha hecho OTRO mientras yo tenia una copia vieja en memoria:
+    # mi copia los trae de vuelta y no debe resucitarlos.
+    borrados_por_otro = disco_borrados_norm - mio_borrados_norm
+
+    out = {}
+    for clave in ("tvshows", "movies"):
+        merged = {}
+        for nombre, valor in (disco.get(clave) or {}).items():
+            if _norm_key(nombre) in nuevos_borrados:
+                continue          # lo he borrado yo en esta misma operacion
+            merged[nombre] = valor
+        for nombre, valor in (mio.get(clave) or {}).items():
+            if _norm_key(nombre) in borrados_por_otro:
+                continue          # otro proceso lo borro: no resucitarlo
+            if isinstance(valor, dict) and isinstance(merged.get(nombre), dict):
+                sub = dict(merged[nombre])
+                sub.update(valor)
+                merged[nombre] = sub
+            else:
+                merged[nombre] = valor
+        out[clave] = merged
+    out["removed_series"] = list(dict.fromkeys(disco_borrados + mio_borrados))
+    for k, v in disco.items():
+        if k not in out:
+            out[k] = v
+    for k, v in mio.items():
+        if k not in out:
+            out[k] = v
+    return out
+
 def save_metadata(meta):
+    lock = None
     try:
         if not xbmcvfs.exists(ADDON_DATA):
+            log("Creando directorio: %s" % ADDON_DATA)
             xbmcvfs.mkdirs(ADDON_DATA)
-        with xbmcvfs.File(METADATA_FILE, 'w') as f:
-            f.write(json.dumps(meta, ensure_ascii=False, indent=2))
-    except Exception as exc:                    # noqa: BLE001
-        log("save_metadata error: %s" % exc)
+        lock = _meta_lock()
+        en_disco = _read_meta_file()
+        if en_disco:
+            antes = (len(en_disco.get("tvshows", {})), len(en_disco.get("movies", {})))
+            meta = _merge_meta(en_disco, meta)
+            ahora = (len(meta.get("tvshows", {})), len(meta.get("movies", {})))
+            if ahora != antes:
+                log("Metadata fusionado con el disco: %s -> %s series/pelis" % (antes, ahora))
+        content = json.dumps(meta, ensure_ascii=False, indent=2)
+        tmp = METADATA_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(content)
+        os.replace(tmp, METADATA_FILE)
+        log("Metadata guardado (%d bytes, fusion+bloqueo): %s" % (len(content), METADATA_FILE))
+    except Exception as e:
+        log("ERROR guardando metadata: %s" % e)
+    finally:
+        if lock:
+            lock.close()
 
 
 # ── Fuentes ───────────────────────────────────────────────────────────────────
