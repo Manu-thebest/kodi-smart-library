@@ -38,6 +38,11 @@ Que hace ahora:
      (GetPlaybackResources) y sacara el DIALOGO DE "continuar viendo" EL SOLO
      al arrancar Kodi. Ahora se re-resuelve por titulo (barato) y solo se
      reescribe el .strm si la URL cambio o falta.
+  8) v6.13.7 PELICULAS: se escribe un .nfo junto al .strm (titulo y anio).
+     Sin .nfo, si el buscador de internet no reconoce la pelicula, Kodi la
+     DESCARTA ("No information found for item X.strm, it won't be added to
+     the library") y no entra en la biblioteca aunque el .strm este en disco.
+     Es el mismo arreglo que ya se hizo con los episodios.
 
 Las series que NO son de Amazon siguen funcionando igual que antes.
 """
@@ -49,6 +54,7 @@ import threading
 import time
 
 import xbmc
+import xbmcaddon
 import xbmcvfs
 
 ADDON_DATA    = xbmcvfs.translatePath("special://profile/addon_data/script.context.smartlibrary/")
@@ -59,6 +65,11 @@ METADATA_FILE = os.path.join(ADDON_DATA, "metadata.json")
 SOURCES_FILE  = xbmcvfs.translatePath("special://profile/sources.xml")
 LOG_TAG       = "[SmartLibrary]"
 ADDON_ID      = "script.context.smartlibrary"
+
+try:
+    ADDON_VERSION = xbmcaddon.Addon(ADDON_ID).getAddonInfo("version")
+except Exception:                            # noqa: BLE001
+    ADDON_VERSION = "?"
 
 AMZ_PLUGIN    = "plugin://plugin.video.amazon-test/"
 AMZ_SEARCH    = AMZ_PLUGIN + "?mode=Search&searchstring="
@@ -435,12 +446,16 @@ def ensure_library_sources():
 
 
 def scan_library():
-    log("Escaneando librería: %s" % TVSHOWS_DIR)
-    _rpc_once({
-        "jsonrpc": "2.0", "method": "VideoLibrary.Scan",
-        "params": {"directory": TVSHOWS_DIR, "showdialogs": False},
-        "id": 1,
-    }, timeout=10)
+    """Escanea series y peliculas. Con los .nfo delante, el escaneo es local."""
+    for d, que in ((TVSHOWS_DIR, "series"), (MOVIES_DIR, "películas")):
+        if not xbmcvfs.exists(d):
+            continue
+        log("Escaneando librería (%s): %s" % (que, d))
+        _rpc_once({
+            "jsonrpc": "2.0", "method": "VideoLibrary.Scan",
+            "params": {"directory": d, "showdialogs": False},
+            "id": 1,
+        }, timeout=10)
 
 
 # ── Escritura de .strm ────────────────────────────────────────────────────────
@@ -486,6 +501,59 @@ def write_episode_nfo(show_dir, show, s_num, e_num, title):
         return True
     except Exception as exc:                    # noqa: BLE001
         log("  error escribiendo nfo %s: %s" % (nfo, exc))
+        return False
+
+
+YEAR_RE = re.compile(r'\((\d{4})\)\s*$')
+
+
+def year_from_title(title):
+    """Separa el anio del final del titulo: 'Godzilla (1984)'.
+
+    Devuelve (titulo_limpio, anio). Anio None si el titulo no lo lleva.
+    """
+    text = (title or '').strip()
+    m = YEAR_RE.search(text)
+    if not m:
+        return text, None
+    return text[:m.start()].strip(), int(m.group(1))
+
+
+def write_movie_nfo(movie_dir, title):
+    """Escribe el .nfo de una pelicula si falta o si cambio.
+
+    Por que: con el .nfo junto al .strm, Kodi da la pelicula por buena y NO
+    consulta el buscador de internet. Sin el, si el buscador no reconoce el
+    titulo, Kodi la descarta ("No information found for item X, it won't be
+    added to the library") y la pelicula no entra en la biblioteca aunque su
+    .strm este en disco. Mismo arreglo que en los episodios.
+    """
+    name, year = year_from_title(title)
+    nfo = os.path.join(movie_dir, "%s.nfo" % title)
+    lines = ['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+             '<movie>',
+             '  <title>%s</title>' % _xml_escape(name)]
+    if year:
+        lines.append('  <year>%d</year>' % year)
+    lines.append('</movie>')
+    content = "\n".join(lines) + "\n"
+    try:
+        if not xbmcvfs.exists(movie_dir):
+            return False
+        if xbmcvfs.exists(nfo):
+            with xbmcvfs.File(nfo, 'r') as f:
+                if f.read() == content:
+                    return False
+        with xbmcvfs.File(nfo, 'w') as f:
+            f.write(content)
+        log("  + nfo pelicula: %s" % os.path.basename(nfo))
+        try:
+            os.utime(movie_dir, None)
+        except Exception:                       # noqa: BLE001
+            pass
+        return True
+    except Exception as exc:                    # noqa: BLE001
+        log("  error escribiendo nfo de pelicula %s: %s" % (nfo, exc))
         return False
 
 
@@ -639,10 +707,16 @@ def check_and_update():
     # ── Peliculas ──
     movies = meta.get("movies", {}) or {}
     for title, path in movies.items():
-        if not is_amazon(path):
-            continue
         movie_dir = os.path.join(MOVIES_DIR, title)
         strm_path = os.path.join(movie_dir, "%s.strm" % title)
+        # v6.13.7: el .nfo se escribe para TODAS las peliculas, sean de Amazon
+        # o de cualquier otra fuente. Sin el, si el buscador de internet no
+        # reconoce el titulo, Kodi descarta el .strm y la pelicula no entra.
+        if xbmcvfs.exists(strm_path):
+            if write_movie_nfo(movie_dir, title):
+                total_changed += 1
+        if not is_amazon(path):
+            continue
         # OJO (v6.13.4): NO listar `path`. La URL de una pelicula es de
         # REPRODUCCION (`?asin=...&mode=PlayVideo`): un Files.GetDirectory
         # sobre ella hace que el add-on de Amazon RESUELVA el video
@@ -743,7 +817,7 @@ class UpdateService(xbmc.Monitor):
         log("=== Fin check %s ===" % context)
 
     def run(self):
-        log("Servicio iniciado (v6.13.4)")
+        log("Servicio iniciado (v%s)" % ADDON_VERSION)
         if self.waitForAbort(30):
             return
         ensure_library_sources()
