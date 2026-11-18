@@ -721,6 +721,7 @@ def check_and_update():
             if write_movie_nfo(movie_dir, title):
                 pelis_nfo += 1
                 total_changed += 1
+                _touch(strm_path)
         if not is_amazon(path):
             continue
         # OJO (v6.13.4): NO listar `path`. La URL de una pelicula es de
@@ -755,10 +756,12 @@ def check_and_update():
             d = os.path.join(MOVIES_DIR, name)
             if name in movies or not os.path.isdir(d):
                 continue
-            if os.path.isfile(os.path.join(d, "%s.strm" % name)):
+            strm = os.path.join(d, "%s.strm" % name)
+            if os.path.isfile(strm):
                 if write_movie_nfo(d, name):
                     pelis_extra += 1
                     total_changed += 1
+                    _touch(strm)
     except Exception as exc:                    # noqa: BLE001
         log("  error recorriendo peliculas en disco: %s" % exc)
     if movies or pelis_extra:
@@ -771,6 +774,19 @@ def check_and_update():
         log("metadata.json actualizado")
 
     return total_changed
+
+
+def _touch(path):
+    """Actualiza el mtime de un fichero (en silencio si falla).
+
+    Kodi no vuelve a mirar una pelicula cuyo .strm no ha cambiado, aunque
+    aparezca un .nfo nuevo a su lado: sin tocar el .strm, el .nfo no se lee y
+    la pelicula sigue fuera de la biblioteca.
+    """
+    try:
+        os.utime(path, None)
+    except Exception:                           # noqa: BLE001
+        pass
 
 
 def clean_title(title):
