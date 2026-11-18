@@ -445,9 +445,54 @@ def scan_library():
 
 # ── Escritura de .strm ────────────────────────────────────────────────────────
 
+def _xml_escape(text):
+    return (text.replace('&', '&amp;').replace('<', '&lt;')
+                .replace('>', '&gt;').replace('"', '&quot;'))
+
+
+def _episode_title(ep, e_num):
+    """Titulo limpio del episodio: '3. Adar' -> 'Adar'."""
+    raw = (ep.get('label') or '').strip()
+    raw = re.sub(r'^\s*\d+\s*[\.\)\-:]\s*', '', raw)
+    return raw or ("Capitulo %d" % e_num)
+
+
+def write_episode_nfo(show_dir, show, s_num, e_num, title):
+    """Escribe el .nfo del episodio si falta o si cambio el titulo.
+
+    Por que: cuando el .nfo existe junto al .strm, Kodi da el episodio por
+    bueno y NO consulta el buscador de internet. Eso evita que descarte
+    capitulos de temporadas que el buscador no tiene (FMA:B repartido en 5
+    temporadas cuando TheMovieDB solo tiene 1, los E25 de Sword Art Online,
+    la temporada 5 de Rent-a-Girlfriend, etc.). Tambien deja el episodio
+    reproducible aunque el buscador no lo conozca.
+    """
+    nfo = os.path.join(show_dir, "%s S%02dE%02d.nfo" % (show, s_num, e_num))
+    content = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        '<episodedetails>\n'
+        '  <title>%s</title>\n'
+        '  <season>%d</season>\n'
+        '  <episode>%d</episode>\n'
+        '</episodedetails>\n' % (_xml_escape(title), s_num, e_num)
+    )
+    try:
+        if xbmcvfs.exists(nfo):
+            with xbmcvfs.File(nfo, 'r') as f:
+                if f.read() == content:
+                    return False
+        with xbmcvfs.File(nfo, 'w') as f:
+            f.write(content)
+        return True
+    except Exception as exc:                    # noqa: BLE001
+        log("  error escribiendo nfo %s: %s" % (nfo, exc))
+        return False
+
+
 def write_episodes(show_dir, show, s_num, episodes):
     """Crea/refresca los .strm de una temporada. Devuelve cuantos cambiaron."""
     changed = 0
+    nfo_written = 0
     # Crear la carpeta SOLO cuando hay episodios que escribir, para no dejar
     # carpetas vacias huerfanas si la fuente no devuelve nada.
     if not xbmcvfs.exists(show_dir):
@@ -460,6 +505,7 @@ def write_episodes(show_dir, show, s_num, episodes):
         if not ep_url:
             continue
         e_num = episode_number(ep, i)
+        ep_title = _episode_title(ep, e_num)
         filepath = os.path.join(
             show_dir, "%s S%02dE%02d.strm" % (show, s_num, e_num))
         try:
@@ -467,6 +513,8 @@ def write_episodes(show_dir, show, s_num, episodes):
                 with xbmcvfs.File(filepath, 'w') as f:
                     f.write(ep_url)
                 log("  + nuevo: %s" % os.path.basename(filepath))
+                if write_episode_nfo(show_dir, show, s_num, e_num, ep_title):
+                    nfo_written += 1
                 changed += 1
                 continue
             with xbmcvfs.File(filepath, 'r') as f:
@@ -476,8 +524,18 @@ def write_episodes(show_dir, show, s_num, episodes):
                     f.write(ep_url)
                 log("  ~ actualizado: %s" % os.path.basename(filepath))
                 changed += 1
+            if write_episode_nfo(show_dir, show, s_num, e_num, ep_title):
+                nfo_written += 1
         except Exception as exc:                # noqa: BLE001
             log("  error escribiendo %s: %s" % (filepath, exc))
+    # Tocar la carpeta cuando hay cambios: Kodi 21 se salta los directorios
+    # "sin cambios" (VideoInfoScanner: Skipping dir ... due to no change) y
+    # por eso no llegaba a ver los .strm nuevos.
+    if changed or nfo_written:
+        try:
+            os.utime(show_dir, None)
+        except Exception:                       # noqa: BLE001
+            pass
     return changed
 
 
