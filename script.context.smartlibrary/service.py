@@ -538,13 +538,13 @@ def write_movie_nfo(movie_dir, title):
     lines.append('</movie>')
     content = "\n".join(lines) + "\n"
     try:
-        if not xbmcvfs.exists(movie_dir):
+        if not os.path.isdir(movie_dir):
             return False
-        if xbmcvfs.exists(nfo):
-            with xbmcvfs.File(nfo, 'r') as f:
+        if os.path.isfile(nfo):
+            with open(nfo, 'r', encoding='utf-8') as f:
                 if f.read() == content:
                     return False
-        with xbmcvfs.File(nfo, 'w') as f:
+        with open(nfo, 'w', encoding='utf-8') as f:
             f.write(content)
         log("  + nfo pelicula: %s" % os.path.basename(nfo))
         try:
@@ -705,15 +705,21 @@ def check_and_update():
                 total_changed += write_episodes(show_dir, show, s_num, eps)
 
     # ── Peliculas ──
+    # v6.13.7: el .nfo se escribe para TODAS las peliculas, sean de Amazon o de
+    # cualquier otra fuente. Sin el, si el buscador de internet no reconoce el
+    # titulo, Kodi descarta el .strm ("No information found for item X") y la
+    # pelicula no entra en la biblioteca aunque el fichero este en disco.
+    # Se comprueba con os.path (no con xbmcvfs): es el mismo sistema de ficheros
+    # que ya usa save_metadata y no depende de como resuelva Kodi la ruta.
     movies = meta.get("movies", {}) or {}
+    pelis_strm = pelis_nfo = 0
     for title, path in movies.items():
         movie_dir = os.path.join(MOVIES_DIR, title)
         strm_path = os.path.join(movie_dir, "%s.strm" % title)
-        # v6.13.7: el .nfo se escribe para TODAS las peliculas, sean de Amazon
-        # o de cualquier otra fuente. Sin el, si el buscador de internet no
-        # reconoce el titulo, Kodi descarta el .strm y la pelicula no entra.
-        if xbmcvfs.exists(strm_path):
+        if os.path.isfile(strm_path):
+            pelis_strm += 1
             if write_movie_nfo(movie_dir, title):
+                pelis_nfo += 1
                 total_changed += 1
         if not is_amazon(path):
             continue
@@ -740,6 +746,25 @@ def check_and_update():
             log("  ~ pelicula actualizada: %s" % title)
         except Exception as exc:                # noqa: BLE001
             log("  error escribiendo peli %s: %s" % (title, exc))
+
+    # Carpetas de pelicula con .strm que NO estan en el registro (restos de
+    # versiones anteriores): sin .nfo tambien se descartan, asi que se cubren.
+    pelis_extra = 0
+    try:
+        for name in sorted(os.listdir(MOVIES_DIR)):
+            d = os.path.join(MOVIES_DIR, name)
+            if name in movies or not os.path.isdir(d):
+                continue
+            if os.path.isfile(os.path.join(d, "%s.strm" % name)):
+                if write_movie_nfo(d, name):
+                    pelis_extra += 1
+                    total_changed += 1
+    except Exception as exc:                    # noqa: BLE001
+        log("  error recorriendo peliculas en disco: %s" % exc)
+    if movies or pelis_extra:
+        log("Películas: %d en el registro, %d con .strm, %d .nfo escritos, "
+            "%d carpetas fuera del registro" %
+            (len(movies), pelis_strm, pelis_nfo + pelis_extra, pelis_extra))
 
     if meta_dirty:
         save_metadata(meta)
