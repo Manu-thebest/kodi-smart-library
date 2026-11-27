@@ -246,8 +246,62 @@ def register_movie(title, path):
 
 # ── Escritura de .strm ────────────────────────────────────────────────────────
 
+def _xml_escape(text):
+    return (text.replace('&', '&amp;').replace('<', '&lt;')
+                .replace('>', '&gt;').replace('"', '&quot;'))
+
+
+def _episode_title(ep, e_num):
+    """Titulo limpio del episodio: '3. Adar' -> 'Adar'."""
+    raw = (ep.get('label') or '').strip()
+    raw = re.sub(r'^\s*\d+\s*[\.\)\-:]\s*', '', raw)
+    return raw or (f"Capitulo {e_num}")
+
+
+def write_episode_nfo(show_dir, show, s_num, e_num, title):
+    """Escribe el .nfo del episodio si falta o cambio el titulo.
+
+    Por que: con el .nfo junto al .strm, Kodi da el episodio por bueno y no
+    consulta el buscador de internet; si el buscador no conoce la serie o el
+    capitulo, sin .nfo lo DESCARTA ("No information found ... it won't be
+    added to the library"). Es el mismo arreglo que ya hace el servicio.
+    """
+    nfo = os.path.join(show_dir, f"{show} S{s_num:02d}E{e_num:02d}.nfo")
+    content = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        '<episodedetails>\n'
+        '  <title>%s</title>\n'
+        '  <season>%d</season>\n'
+        '  <episode>%d</episode>\n'
+        '</episodedetails>\n' % (_xml_escape(title), s_num, e_num)
+    )
+    try:
+        if xbmcvfs.exists(nfo):
+            with xbmcvfs.File(nfo, 'r') as f:
+                if f.read() == content:
+                    return False
+        with xbmcvfs.File(nfo, 'w') as f:
+            f.write(content)
+        return True
+    except Exception as exc:                    # noqa: BLE001
+        log(f"  Error escribiendo nfo {nfo}: {exc}")
+        return False
+
+
 def write_episodes(show_dir, show, s_num, episodes, dp, offset, total):
     created = 0
+    touched = 0
+    if not episodes:
+        # Sin episodios NO se crea la carpeta: una carpeta vacia deja la serie
+        # a medias en Kodi ("No information found") y aqui no habia nada que ver.
+        log(f"  T{s_num}: sin episodios, no se escribe nada")
+        return 0
+    if not xbmcvfs.exists(show_dir):
+        try:
+            xbmcvfs.mkdirs(show_dir)
+        except Exception as exc:                # noqa: BLE001
+            log(f"  Error creando la carpeta {show_dir}: {exc}")
+            return 0
     for i, ep in enumerate(episodes):
         if dp.iscanceled():
             break
@@ -274,9 +328,112 @@ def write_episodes(show_dir, show, s_num, episodes, dp, offset, total):
                     created += 1
             except Exception:
                 pass
+        if write_episode_nfo(show_dir, show, s_num, e_num, _episode_title(ep, e_num)):
+            touched += 1
         dp.update(int((offset + i + 1) / max(total, 1) * 100),
                   f"T{s_num} · Episodio {e_num}")
+    # Tocar la carpeta: Kodi 21 se salta los directorios "sin cambios"
+    # (VideoInfoScanner: Skipping dir ... due to no change) y no llega a ver
+    # los .strm nuevos.
+    if created or touched:
+        try:
+            os.utime(show_dir, None)
+        except Exception:                       # noqa: BLE001
+            pass
     return created
+
+
+# ── Añadir la serie a la biblioteca de Kodi (y comprobar que entra) ───────────
+
+def _show_in_library(show_dir):
+    """True si Kodi ya tiene una serie con ficheros dentro de `show_dir`."""
+    req = json.dumps({"jsonrpc": "2.0", "method": "VideoLibrary.GetTVShows",
+                      "params": {"properties": ["file"]}, "id": 1})
+    try:
+        res = json.loads(xbmc.executeJSONRPC(req))
+    except Exception as exc:                    # noqa: BLE001
+        log(f"  No se pudo consultar la biblioteca: {exc}")
+        return False
+    if not isinstance(res, dict):
+        return False
+    shows = (res.get("result") or {}).get("tvshows") or []
+    prefix = show_dir.rstrip('/') + '/'
+    for it in shows:
+        if isinstance(it, dict) and (it.get('file') or '').startswith(prefix):
+            return True
+    return False
+
+
+def _wait_in_library(show_dir, seconds=25):
+    """Espera a que el escaneo (asincrono) meta la serie en la biblioteca."""
+    waited = 0
+    while waited < seconds:
+        if _show_in_library(show_dir):
+            return True
+        xbmc.sleep(1500)
+        waited += 1.5
+    return _show_in_library(show_dir)
+
+
+def write_tvshow_nfo(show_dir, show, year=''):
+    """Deja un tvshow.nfo minimo para que Kodi añada la serie SIEMPRE.
+
+    Solo se usa cuando el escaneo normal no la ha metido: sin tvshow.nfo Kodi
+    tiene que reconocer el nombre con el buscador de internet y, si no lo
+    reconoce (serie nueva, nombre raro), la descarta y no la añade nunca.
+    Con tvshow.nfo la añade usando la informacion local.
+    """
+    nfo = os.path.join(show_dir, "tvshow.nfo")
+    if xbmcvfs.exists(nfo):
+        return False
+    lines = ['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+             '<tvshow>',
+             '  <title>%s</title>' % _xml_escape(show)]
+    if year:
+        lines.append('  <year>%s</year>' % _xml_escape(str(year)))
+    lines.append('</tvshow>')
+    try:
+        with xbmcvfs.File(nfo, 'w') as f:
+            f.write("\n".join(lines) + "\n")
+        log(f"Escrito tvshow.nfo (el buscador no la reconocia): {nfo}")
+        return True
+    except Exception as exc:                    # noqa: BLE001
+        log(f"  Error escribiendo tvshow.nfo: {exc}")
+        return False
+
+
+def ensure_in_library(show_dir, show, year=''):
+    """Escanea la carpeta de la serie y no para hasta que Kodi la tenga.
+
+    1) Escanea ESA carpeta (no la raiz: escanear la raiz fue justo lo que
+       dejaba la serie fuera) y espera a que aparezca en la biblioteca.
+    2) Si no entra, escribe tvshow.nfo y vuelve a escanear.
+    Devuelve True si al final esta en la biblioteca.
+    """
+    if not os.path.isdir(show_dir) and not xbmcvfs.exists(show_dir):
+        return False
+    log(f"Escaneando la carpeta de la serie: {show_dir}")
+    scan_library(show_dir)
+    if _wait_in_library(show_dir, 25):
+        log("  La serie esta en la biblioteca")
+        return True
+    log("  Kodi no la ha añadido; se deja tvshow.nfo y se reescanea")
+    if write_tvshow_nfo(show_dir, show, year):
+        scan_library(show_dir)
+        return _wait_in_library(show_dir, 25)
+    scan_library(show_dir)
+    return _wait_in_library(show_dir, 15)
+
+
+
+def _season_written(show_dir, show, s_num):
+    """True si esa temporada ya tiene algun .strm en la carpeta."""
+    try:
+        prefix = f"{show} S{s_num:02d}E"
+        return any(n.startswith(prefix) and n.endswith('.strm')
+                   for n in os.listdir(show_dir))
+    except Exception:                           # noqa: BLE001
+        return False
 
 
 # ── Diálogos ──────────────────────────────────────────────────────────────────
@@ -391,12 +548,9 @@ def _do_check():
     
     for show, seasons in active.items():
         show_dir = os.path.join(TVSHOWS_DIR, show)
-        if not xbmcvfs.exists(show_dir):
-            try:
-                xbmcvfs.mkdirs(show_dir)
-            except:
-                continue
-        
+        # Sin carpeta todavia: se crea al escribir el primer episodio (write
+        # dentro del bucle). Antes se creaba aqui y las series sin episodios
+        # dejaban una carpeta vacia que Kodi no añadia.
         log("Revisando: %s" % show)
         
         for s_str, season_path in list(seasons.items()):
@@ -434,11 +588,22 @@ def _do_check():
                 if not xbmcvfs.exists(fpath):
                     log("  -> Nuevo: %s" % fname)
                     try:
+                        if not xbmcvfs.exists(show_dir):
+                            xbmcvfs.mkdirs(show_dir)
                         with xbmcvfs.File(fpath, 'w') as f:
                             f.write(ep_url)
+                        write_episode_nfo(show_dir, show, s_num, e_num,
+                                          _episode_title(ep, e_num))
                         new_count += 1
                     except:
                         pass
+
+    if new_count:
+        for show in active:
+            try:
+                os.utime(os.path.join(TVSHOWS_DIR, show), None)
+            except Exception:
+                pass
     
     # Guardar reparaciones de rutas
     if path_fixes:
@@ -685,11 +850,14 @@ def main():
 
     has_dirs = any(is_directory(it) for it in items)
     show_dir = os.path.join(TVSHOWS_DIR, show)
-    if not xbmcvfs.exists(show_dir):
-        xbmcvfs.mkdirs(show_dir)
+    # OJO: la carpeta NO se crea aqui. Se crea al escribir el primer episodio
+    # (create_folder_if_needed dentro de write_episodes). Si se creaba antes y
+    # al final no se escribia nada, quedaba una carpeta vacia y Kodi la daba
+    # por buena sin añadir la serie ("No information found").
 
     dp = xbmcgui.DialogProgress()
     total_created = 0
+    last_s_num = None
 
     # ── Serie completa ────────────────────────────────────────────────────────
     if has_dirs:
@@ -702,37 +870,63 @@ def main():
             if s_num is None:
                 s_num, _ = find_season(s.get('file', ''))
             s_num = s_num or (len(season_data) + 1)
-            register_tvshow(show, s_num, s.get('file', ''))
-            season_data.append((s_num, eps))
+            season_data.append((s_num, eps, s.get('file', '')))
 
-        total_eps = sum(len(e) for _, e in season_data)
+        total_eps = sum(len(e) for _, e, _p in season_data)
         offset = 0
-        for s_num, eps in season_data:
-            total_created += write_episodes(show_dir, show, s_num, eps, dp, offset, total_eps)
+        for s_num, eps, spath in season_data:
+            if dp.iscanceled():
+                break
+            created = write_episodes(show_dir, show, s_num, eps, dp, offset, total_eps)
+            total_created += created
             offset += len(eps)
+            # Solo se registra la temporada si de verdad tiene episodios: si no,
+            # el servicio la reintentaria cada 6 h y volveria a dejar la carpeta
+            # vacia.
+            if created or _season_written(show_dir, show, s_num):
+                register_tvshow(show, s_num, spath)
+                last_s_num = s_num
+            else:
+                log(f"  T{s_num}: sin episodios, no se registra")
 
     # ── Temporada individual ──────────────────────────────────────────────────
     else:
-        s_num = ask("Número de temporada", s_num_hint, numeric=True)
+        # Default 1: las series que no traen carpetas de temporada son la
+        # temporada 1. Antes el dialogo salia vacio y, al dejarlo en blanco o
+        # cancelar, la serie quedaba fuera de la biblioteca.
+        s_num = ask("Número de temporada", s_num_hint or 1, numeric=True)
         if s_num is None:
-            return
+            s_num = s_num_hint or 1
         episodes = [it for it in items if not is_directory(it) and not is_promo(it)]
         dp.create("Smart Library", f"{show} — Temporada {s_num}")
-        register_tvshow(show, s_num, path)
         total_created = write_episodes(show_dir, show, s_num, episodes, dp, 0, len(episodes))
+        if total_created or _season_written(show_dir, show, s_num):
+            register_tvshow(show, s_num, path)
+            last_s_num = s_num
+        else:
+            log(f"  T{s_num}: sin episodios, no se registra")
 
     dp.close()
 
-    if total_created > 0:
-        xbmcgui.Dialog().notification("Smart Library",
-            f"{show}: {total_created} episodio(s) añadidos ✓",
-            xbmcgui.NOTIFICATION_INFO, 4000)
-        scan_library(TVSHOWS_DIR)
-        notify_service()
+    # ── Meter la serie en la biblioteca y COMPROBAR que ha entrado ────────────
+    in_lib = False
+    if last_s_num is not None and (os.path.isdir(show_dir) or xbmcvfs.exists(show_dir)):
+        in_lib = ensure_in_library(show_dir, show)
+
+    if total_created > 0 and in_lib:
+        msg  = f"{show}: {total_created} episodio(s) añadidos ✓"
+        icon = xbmcgui.NOTIFICATION_INFO
+    elif total_created > 0:
+        msg  = f"{show}: {total_created} escritos, pero Kodi no la ha añadido (mira el log)"
+        icon = xbmcgui.NOTIFICATION_WARNING
+    elif in_lib:
+        msg  = f"{show}: ya estaba en la biblioteca"
+        icon = xbmcgui.NOTIFICATION_INFO
     else:
-        xbmcgui.Dialog().notification("Smart Library",
-            f"{show}: sin episodios nuevos",
-            xbmcgui.NOTIFICATION_INFO, 3000)
+        msg  = f"{show}: sin episodios nuevos"
+        icon = xbmcgui.NOTIFICATION_INFO
+    xbmcgui.Dialog().notification("Smart Library", msg, icon, 5000)
+    notify_service()
 
 
 if __name__ == '__main__':
