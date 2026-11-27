@@ -412,17 +412,34 @@ def ensure_in_library(show_dir, show, year=''):
     """
     if not os.path.isdir(show_dir) and not xbmcvfs.exists(show_dir):
         return False
-    log(f"Escaneando la carpeta de la serie: {show_dir}")
-    scan_library(show_dir)
-    if _wait_in_library(show_dir, 25):
-        log("  La serie esta en la biblioteca")
-        return True
-    log("  Kodi no la ha añadido; se deja tvshow.nfo y se reescanea")
-    if write_tvshow_nfo(show_dir, show, year):
+    # Aviso de fondo (no bloquea): si el buscador falla, la espera puede durar
+    # medio minuto y sin esto parecia que Kodi se habia quedado colgado.
+    bg = None
+    try:
+        bg = xbmcgui.DialogProgressBG()
+        bg.create("Smart Library", f"Añadiendo '{show}' a la biblioteca...")
+    except Exception:                           # noqa: BLE001
+        bg = None
+    try:
+        log(f"Escaneando la carpeta de la serie: {show_dir}")
         scan_library(show_dir)
-        return _wait_in_library(show_dir, 25)
-    scan_library(show_dir)
-    return _wait_in_library(show_dir, 15)
+        if _wait_in_library(show_dir, 12):
+            log("  La serie esta en la biblioteca")
+            return True
+        log("  Kodi no la ha añadido; se deja tvshow.nfo y se reescanea")
+        if bg:
+            bg.update(message=f"'{show}': añadiendo datos locales...")
+        if write_tvshow_nfo(show_dir, show, year):
+            scan_library(show_dir)
+            return _wait_in_library(show_dir, 20)
+        scan_library(show_dir)
+        return _wait_in_library(show_dir, 12)
+    finally:
+        if bg:
+            try:
+                bg.close()
+            except Exception:                   # noqa: BLE001
+                pass
 
 
 
