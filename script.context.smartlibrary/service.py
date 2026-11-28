@@ -652,6 +652,310 @@ def resolve_amazon_seasons(show, stored):
     return seasons
 
 
+# ── Temporadas nuevas en TODAS las fuentes (parche-manu-todas-fuentes-v1) ────
+#
+# v6.13.5 — Antes solo se buscaban temporadas nuevas en Amazon; para el resto de
+# fuentes (Crunchyroll, Max, Movistar+, ...) se seguian las temporadas guardadas
+# y punto. Ahora, en una serie que NO es de Amazon:
+#
+#   1) Se deduce la pagina de la SERIE a partir de la ruta guardada de una
+#      temporada. En la ruta se prueban los antecesores (1, 2 y 3 tramos menos):
+#      `.../series/<serie>/<temporada>/audio/es-ES` -> `.../series/<serie>`.
+#      En la query se quita el parametro de temporada
+#      (`?_=series&id=<serie>&season=1`) y se prueba tambien
+#      `action=season` -> `action=series`.
+#   2) Si eso no da temporadas, se busca la serie por su titulo en el buscador
+#      del propio add-on (tabla BUSCADORES).
+#   3) Una pagina se acepta SOLO si sus temporadas incluyen alguna de las ya
+#      guardadas: asi no se confunde con un menu cualquiera (los antecesores de
+#      Crunchyroll devuelven el menu raiz del add-on, por ejemplo).
+#   4) Solo se ANADEN las temporadas que falten; las guardadas NO se
+#      sobrescriben (cada temporada de Crunchyroll tiene una variante por idioma
+#      de audio y no queremos cambiarle el audio a la que ya funcionaba). Solo
+#      si una ruta guardada se queda vacia se usa la descubierta.
+#
+# El numero de temporada se saca de la propiedad `season` del listado (varios
+# add-ons la rellenan aunque la etiqueta no lleve numero: "Basilisk [US Audio]")
+# y, si no, del texto de la etiqueta o de la ruta ("Temporada 4", "Season 1").
+
+_PARAM_TEMPORADA = ('season', 'season_number', 'seasonid', 'season_id',
+                    'temporada', 'temp')
+_ACCION_TEMPORADA = ('season', 'temporada', 'episodes', 'episodios')
+_NIVELES_PADRE = 3          # cuantos tramos de ruta se prueban hacia arriba
+
+# Add-ons con buscador propio: (trozo de ruta, plantilla de busqueda por titulo)
+BUSCADORES = (
+    ('plugin.video.movistarplus',
+     'plugin://plugin.video.movistarplus/?action=search&search_term='),
+)
+
+# Memoria de la propia ejecucion: por add-on, que tipo de pagina funciono
+# (para no repetir los intentos fallidos en cada serie del mismo add-on).
+_AJUSTE_FUENTE = {}
+
+
+def _fuente_de(path):
+    """'plugin.video.movistarplus' a partir de 'plugin://plugin.video.movistarplus/...'."""
+    p = path or ''
+    if p.startswith('plugin://'):
+        return p[len('plugin://'):].split('/')[0]
+    return ''
+
+
+def _sin_acentos_plus(valor):
+    """unquote_plus sin depender de que urllib este importado."""
+    try:
+        from urllib.parse import unquote_plus
+        return unquote_plus(valor or '')
+    except Exception:                            # noqa: BLE001
+        return (valor or '').replace('+', ' ')
+
+
+def _padres_de_temporada(path):
+    """[(tipo, nivel, url)] candidatos a pagina-SERIE de una ruta de temporada."""
+    cands = []
+    p = (path or '').strip()
+    if not p:
+        return cands
+    base, sep, query = p.partition('?')
+    if sep:
+        trozos = [t for t in query.split('&') if t]
+        sin_temp = []
+        quitado = False
+        tiene_temp = False
+        for kv in trozos:
+            k, _, v = kv.partition('=')
+            kl = k.lower()
+            if kl in _PARAM_TEMPORADA:
+                quitado = True
+                tiene_temp = True
+                continue
+            sin_temp.append(kv)
+        con_series = []
+        cambiado = False
+        for kv in sin_temp:
+            k, _, v = kv.partition('=')
+            if k.lower() == 'action' and v.lower() in _ACCION_TEMPORADA:
+                # v6.14.2 — OJO: en estas rutas el `id` suele ser el de la
+                # TEMPORADA ("action=season&id=4248311", Movistar+), asi que
+                # cambiar `action` a `series` pide una serie que no existe; el
+                # add-on de Movistar+ lo peta ademas con KeyError: 'name'.
+                # Solo se convierte si la temporada va aparte, en su propio
+                # parametro ("action=season&id=<serie>&season=2").
+                if not tiene_temp:
+                    cambiado = False
+                    con_series = []
+                    break
+                kv = k + '=series'
+                cambiado = True
+            con_series.append(kv)
+        for lista, aplica in ((sin_temp, quitado), (con_series, cambiado)):
+            if not aplica:
+                continue
+            q = '&'.join(lista)
+            cand = (base + '?' + q) if q else base
+            if cand and cand != p and cand not in [c[2] for c in cands]:
+                cands.append(('padre-query', 0, cand))
+    else:
+        limpio = p.rstrip('/')
+        resto = limpio[len('plugin://'):] if limpio.startswith('plugin://') else limpio
+        for nivel in range(1, _NIVELES_PADRE + 1):
+            if resto.count('/') < nivel:
+                break
+            padre = limpio
+            for _ in range(nivel):
+                padre = padre.rsplit('/', 1)[0]
+            for cand in (padre, padre + '/'):
+                if cand and cand.rstrip('/') != limpio and cand not in [
+                        c[2] for c in cands]:
+                    cands.append(('padre', nivel, cand))
+    return cands
+
+
+_EXTRA = ('ova', 'oad', 'especial', 'special', 'recap', 'resumen',
+          'pelicula', 'movie', 'avance', 'trailer', 'preview')
+
+
+def _es_extra(etiqueta):
+    """True para OVAs, especiales, recaps, peliculas y avances (no son temporada)."""
+    t = (etiqueta or '').lower()
+    if not t:
+        return False
+    for palabra in _EXTRA:
+        if palabra in t:
+            return True
+    return False
+
+
+def _temporadas_en_items(items, prioridad='prop'):
+    """{n: [rutas]} de una pagina; {} si esa pagina no parece de temporadas.
+
+    `prioridad` elige de donde sale el numero: la propiedad `season` del listado
+    (los add-ons suelen rellenarla aunque la etiqueta no lleve numero:
+    "Basilisk [US Audio]") o el texto de la etiqueta/ruta (hay add-ons que
+    ponen una `season` que no cuadra con lo que se ve: "Temporada 1" con
+    season=2).
+    """
+    halladas = {}
+    for it in items or []:
+        if it.get('filetype') != 'directory':
+            continue
+        ruta = it.get('file') or ''
+        if _es_extra(it.get('label')):
+            continue
+        prop = None
+        try:
+            prop = int(it.get('season'))
+        except (TypeError, ValueError):
+            prop = None
+        if prop is not None and not 1 <= prop <= 99:
+            prop = None
+        texto = season_number(it.get('label')) or season_number(ruta)
+        if texto is not None and not 1 <= texto <= 99:
+            texto = None
+        if prioridad == 'prop':
+            n = prop if prop is not None else texto
+        else:
+            n = texto if texto is not None else prop
+        if n is None:
+            continue
+        halladas.setdefault(n, [])
+        if ruta and ruta not in halladas[n]:
+            halladas[n].append(ruta)
+    return halladas
+
+
+def _compatible(a, b):
+    """Dos rutas de la misma temporada (una guardada y otra recien leida)."""
+    a = a or ''
+    b = b or ''
+    if not a or not b:
+        return False
+    return a == b or a.startswith(b) or b.startswith(a)
+
+
+def _puntos_pagina(halladas, guardadas):
+    """Cuantas temporadas guardadas reconoce esta pagina, con su misma ruta."""
+    puntos = 0
+    for n, rutas in (halladas or {}).items():
+        ref = (guardadas or {}).get(n)
+        if not ref:
+            continue
+        if any(_compatible(r, ref) for r in rutas):
+            puntos += 1
+    return puntos
+
+
+def _prefijo_comun(a, b):
+    n = 0
+    for x, y in zip(a or '', b or ''):
+        if x != y:
+            break
+        n += 1
+    return n
+
+
+def _mejor_variante(rutas, referencia):
+    """De varias rutas de la misma temporada, la que mas se parece a las guardadas."""
+    def puntos(r):
+        if not referencia:
+            return 0
+        return max(_prefijo_comun(r, s) for s in referencia)
+    validas = [r for r in rutas if r]
+    if not validas:
+        return None
+    return max(validas, key=puntos)
+
+
+def _series_por_titulo(url_busqueda, show):
+    """Lista el buscador del add-on y devuelve paginas de serie con ese titulo."""
+    want = norm_title(show)
+    if not want:
+        return []
+    exactas = []
+    parecidas = []
+    for it in list_dir(url_busqueda):
+        if it.get('filetype') != 'directory' or not it.get('file'):
+            continue
+        etiqueta = norm_title(it.get('label'))
+        if etiqueta == want:
+            exactas.append(it['file'])
+        elif etiqueta.startswith(want) and len(etiqueta) <= len(want) + 12:
+            parecidas.append(it['file'])
+    return (exactas + parecidas)[:3]
+
+
+def resolve_other_seasons(show, seasons):
+    """{n: ruta} con TODAS las temporadas de una serie que NO es de Amazon."""
+    guardadas = {}
+    for k, v in (seasons or {}).items():
+        if not v or is_amazon(v):
+            continue
+        try:
+            guardadas[int(k)] = v
+        except (TypeError, ValueError):
+            continue
+    if not guardadas:
+        return {}
+    guardadas_paths = [p for p in guardadas.values() if p]
+    fuente = _fuente_de(guardadas_paths[0])
+
+    candidatos = []
+    for p in guardadas_paths:
+        for cand in _padres_de_temporada(p):
+            if cand[2] in guardadas_paths:
+                continue
+            if cand[2] not in [c[2] for c in candidatos]:
+                candidatos.append(cand)
+
+    for trozo, plantilla in BUSCADORES:
+        if not any(trozo in (p or '') for p in guardadas_paths):
+            continue
+        q = (show or '').strip().replace(' ', '+')
+        if not q:
+            continue
+        for url in _series_por_titulo(plantilla + q, show):
+            if url not in [c[2] for c in candidatos]:
+                candidatos.append(('buscador', 0, url))
+
+    # Lo que ya funciono con este add-on, primero
+    acierto = _AJUSTE_FUENTE.get(fuente)
+    if acierto:
+        candidatos.sort(key=lambda c: 0 if (c[0], c[1]) == acierto else 1)
+
+    mejor_pagina = None
+    mejor_puntos = 0
+    for tipo, nivel, cand in candidatos[:12]:
+        halladas = _temporadas_en_items(list_dir(cand), 'prop')
+        if not halladas:
+            continue
+        # Se exige que la pagina reconozca alguna temporada guardada CON SU MISMA
+        # RUTA: asi no se cuela otra serie con el mismo titulo ("Doc" / "DOC")
+        # ni una pagina que no es la de esta serie.
+        puntos = _puntos_pagina(halladas, guardadas)
+        if puntos <= 0:
+            continue
+        if puntos > mejor_puntos:
+            mejor_puntos = puntos
+            mejor_pagina = (tipo, nivel, halladas)
+        if puntos == len(set(halladas) & set(guardadas)):
+            break
+
+    if not mejor_pagina:
+        log("  %s: sin pagina de serie reconocible (solo temporadas guardadas)" % show)
+        return {}
+    tipo, nivel, halladas = mejor_pagina
+    _AJUSTE_FUENTE[fuente] = (tipo, nivel)
+    out = {}
+    for n, rutas in halladas.items():
+        mejor = _mejor_variante(rutas, guardadas_paths)
+        if mejor:
+            out[n] = mejor
+    log("  %s: pagina de la serie -> T%s" % (
+        show, ",".join(str(n) for n in sorted(out))))
+    return out
+
+
 # ── Comprobacion principal ────────────────────────────────────────────────────
 
 def check_and_update():
@@ -670,6 +974,9 @@ def check_and_update():
                       if is_amazon(v)}
         log("Comprobando: %s" % show)
 
+        stored_otras = {k: v for k, v in (seasons or {}).items()
+                        if v and not is_amazon(v)}
+
         if stored_amz:
             # ── Serie de Amazon: resolucion general + temporadas nuevas ──
             live = resolve_amazon_seasons(show, seasons)
@@ -686,18 +993,53 @@ def check_and_update():
                     continue
                 log("  T%d: %d episodio(s)" % (n, len(eps)))
                 total_changed += write_episodes(show_dir, show, n, eps)
-        else:
-            # ── Otras fuentes: comportamiento clasico ──
-            for s_str, season_path in sorted((seasons or {}).items()):
-                if not season_path:
+        if stored_otras:
+            # ── Otras fuentes: temporadas nuevas + actualizacion (v6.13.5) ──
+            live = resolve_other_seasons(show, seasons)
+            # Solo se anaden temporadas POSTERIORES a la ultima guardada: lo que
+            # interesa es la temporada siguiente, no rellenar temporadas viejas
+            # que nunca se siguieron (eso llenaria la biblioteca de episodios
+            # que no ha pedido nadie).
+            techo = 0
+            for k, v in (seasons or {}).items():
+                if not v or is_amazon(v):
                     continue
                 try:
-                    s_num = int(s_str)
+                    techo = max(techo, int(k))
                 except (TypeError, ValueError):
                     continue
+            for n, path in sorted(live.items()):
+                key = str(n)
+                if seasons.get(key) or n <= techo:
+                    continue
+                seasons[key] = path
+                meta_dirty = True
+                log("  T%d: TEMPORADA NUEVA (%s)" % (n, path[:60]))
+
+            objetivos = {}
+            for k, v in (seasons or {}).items():
+                if not v or is_amazon(v):
+                    continue
+                try:
+                    objetivos[int(k)] = v
+                except (TypeError, ValueError):
+                    continue
+
+            for s_num in sorted(objetivos):
+                season_path = objetivos[s_num]
                 eps = [e for e in list_dir(season_path)
                        if e.get('filetype') != 'directory'
                        and not is_promo(e.get('label', ''))]
+                if not eps and s_num in live and live[s_num] != season_path:
+                    # La ruta guardada ya no sirve: se usa la descubierta.
+                    alt = live[s_num]
+                    eps = [e for e in list_dir(alt)
+                           if e.get('filetype') != 'directory'
+                           and not is_promo(e.get('label', ''))]
+                    if eps:
+                        log("  T%d: ruta guardada vacia, uso la nueva" % s_num)
+                        seasons[str(s_num)] = alt
+                        meta_dirty = True
                 if not eps:
                     log("  T%d: sin episodios — %s" % (s_num, season_path[:60]))
                     continue
